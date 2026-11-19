@@ -31,6 +31,11 @@ The following code can be used to read in data from a pcap file.
 	  }
 	}
 
+A truncated or otherwise unreadable savefile makes the first failing
+ReadPacketData return NextErrorReadError; every call after that returns
+io.EOF. Treat a read error as final for the handle instead of retrying, since
+the byte stream can no longer be resynchronized to record boundaries.
+
 # Reading Live Packets
 
 The following code can be used to read in data from a live device, in this case

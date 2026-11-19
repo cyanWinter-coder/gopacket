@@ -499,6 +499,13 @@ func (i ICMPv6Option) String() string {
 				binary.BigEndian.Uint32(i.Data[2:]))
 		}
 	case ICMPv6OptRecursiveDNSServer:
+		// The lifetime occupies Data[2:6]; a shorter option cannot carry it.
+		// Wire-decoded options are already length-checked, but a programmatically
+		// constructed option must not make String() slice out of bounds — fall
+		// through to the hex renderer like the other guarded branches.
+		if len(i.Data) < 6 {
+			break
+		}
 		lifetime := time.Duration(binary.BigEndian.Uint32(i.Data[2:6])) * time.Second
 		num := (len(i.Data) - 6) / 16
 		ips := make([]string, num)

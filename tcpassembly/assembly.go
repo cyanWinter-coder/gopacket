@@ -16,6 +16,39 @@
 // data in stream order to that object.  A concurrency-safe StreamPool keeps
 // track of all current Streams being reassembled, so multiple Assemblers may
 // run at once to assemble packets while taking advantage of multiple cores.
+//
+// # Error Handling And The layers Boundary
+//
+// Strictness lives in layers, not here. layers.TCP.DecodeFromBytes rejects a
+// truncated header or data offset with an error and SetTruncated, but still
+// registers the partial layer, whose Payload is clipped to the captured bytes.
+// An Assembler never re-validates the *layers.TCP it is handed and never
+// indexes past its Payload, so both common caller policies are safe:
+//
+//   - Strict: inspect Packet.ErrorLayer (or the parser's Truncated flag) and
+//     skip errored packets before calling AssembleWithTimestamp. The gap is
+//     treated like any lost segment and repaired from later retransmissions,
+//     or reported through Reassembly.Skip on a flush.
+//   - Tolerant: feed every decoded TCP layer. A partial layer whose payload
+//     is empty is ignored as a useless packet; one carrying in-bounds bytes is
+//     reassembled normally.
+//
+// Frames whose protocol is unknown never produce a TCP layer, so the usual
+// Packet.Layer(layers.LayerTypeTCP) lookup returns nil and they never reach an
+// Assembler or create a stream.
+//
+// # Timeouts And Stream Closure
+//
+// Out-of-order bytes are held in page order waiting for the missing sequence
+// range. FlushWithOptions/FlushOlderThan push pages whose oldest queued page
+// is older than the cutoff, prefixing them with a Reassembly.Skip carrying the
+// number of skipped bytes (-1 when the stream start itself was never seen), so
+// bytes from different sequence ranges are never silently merged. A
+// CloseAll flush (the default of FlushOlderThan) then closes the drained
+// connection; a late segment arriving afterwards starts a fresh stream instead
+// of joining the completed one. Call FlushAll at shutdown to deliver every
+// remaining page. RST/FIN segments that fall before the expected sequence are
+// ignored per RFC 5961, and an out-of-order RST is never queued as stream end.
 package tcpassembly
 
 import (

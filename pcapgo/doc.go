@@ -58,5 +58,30 @@ at NewNgWriterInterface for more advanced usage.
 
 	err = r.WritePacket(ci, data)
 	...
+
+# Malformed And Truncated Capture Files
+
+The readers treat lengths declared by the file as untrusted input and keep the
+byte stream synchronized to the container format:
+
+  - A classic pcap record whose CaptureLength runs past the snap length, past
+    the original packet length, or past the end of the file is rejected. The
+    classic Reader then returns io.EOF on every later call, so a Packets()
+    range loop stops instead of reinterpreting the missing record's tail as
+    another header. Lengths above the eager-read limit are grown with the
+    bytes actually read, so a huge declared length in a tiny file cannot force
+    a multi-gigabyte allocation.
+  - A pcapng block is bounded by its block total length. ReadPacketData and
+    ZeroCopyReadPacketData reject a packet block whose declared CaptureLength
+    does not fit in the block before reading past its boundary, which keeps one
+    corrupt block from being merged into a packet and desynchronizing every
+    block that follows; a truncated block header or body surfaces as
+    io.ErrUnexpectedEOF.
+  - An unrecognized pcapng block type is skipped over its declared length, and
+    an unknown pcap magic or version is rejected when the reader is opened.
+
+gopacket.NewPacketSource turns these read errors into the end of the packet
+channel; the layer decoders then apply their own truncation rules to the
+frames that were read successfully (see the layers package documentation).
 */
 package pcapgo

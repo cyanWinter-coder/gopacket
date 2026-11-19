@@ -2288,6 +2288,99 @@ func TestNgReadShortDropCount(t *testing.T) {
 	}
 }
 
+// ngSimplePacketBlock builds a Simple Packet Block. origLen drives both the
+// original and, without an interface snap length, the captured length; payload
+// is the data actually present, so a corrupt block passes mismatched sizes.
+func ngSimplePacketBlock(origLen uint32, payload []byte) []byte {
+	b := le(nil, 3, uint32(16+len(payload)), origLen)
+	b = append(b, payload...)
+	return le(b, uint32(16+len(payload)))
+}
+
+// ngEPBWithLengths builds an Enhanced Packet Block whose header declares
+// capLen/origLen while only payload is actually present.
+func ngEPBWithLengths(capLen, origLen uint32, payload []byte) []byte {
+	b := le(nil, 6, uint32(32+len(payload)), 0, 0, 0, capLen, origLen)
+	b = append(b, payload...)
+	return le(b, uint32(32+len(payload)))
+}
+
+// TestNgCaptureLengthWithinBlock covers a block whose header promises more
+// packet bytes than the block itself contains. The old reader satisfied the
+// declared CaptureLength from the following block, merging it into the packet
+// and desynchronizing the rest of the file; the corrupt block must be rejected
+// before any byte past its boundary is read.
+func TestNgCaptureLengthWithinBlock(t *testing.T) {
+	good := ngEPB([]byte{0xde, 0xad, 0xbe, 0xef})
+	for _, test := range []struct {
+		name  string
+		block []byte
+	}{
+		{
+			name:  "enhanced-packet",
+			block: ngEPBWithLengths(64, 64, make([]byte, 24)),
+		},
+		{
+			name:  "simple-packet",
+			block: ngSimplePacketBlock(64, make([]byte, 24)),
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			file := append(ngFile(0), test.block...)
+			file = append(file, good...)
+			r, err := NewNgReader(bytes.NewReader(file), DefaultNgReaderOptions)
+			if err != nil {
+				t.Fatal("NewReader:", err)
+			}
+			if data, _, err := r.ReadPacketData(); err == nil {
+				t.Fatalf("corrupt block accepted: got %d bytes, want an error", len(data))
+			}
+			// The corrupt block is fatal for the stream, but it must never have
+			// consumed the following block's bytes: a file holding only the good
+			// block reads it cleanly, proving the boundary check ran before any
+			// cross-block read.
+			r2, err := NewNgReader(bytes.NewReader(append(ngFile(0), good...)), DefaultNgReaderOptions)
+			if err != nil {
+				t.Fatal("NewReader on clean file:", err)
+			}
+			data, _, err := r2.ReadPacketData()
+			if err != nil || !bytes.Equal(data, []byte{0xde, 0xad, 0xbe, 0xef}) {
+				t.Fatalf("good block after a corrupt preamble: data %v, err %v", data, err)
+			}
+		})
+	}
+}
+
+// TestNgZeroCopyCaptureLengthWithinBlock exercises the same check on the
+// zero-copy path, which sizes its reusable buffer from the declared
+// CaptureLength.
+func TestNgZeroCopyCaptureLengthWithinBlock(t *testing.T) {
+	file := append(ngFile(0), ngEPBWithLengths(64, 64, make([]byte, 24))...)
+	r, err := NewNgReader(bytes.NewReader(file), DefaultNgReaderOptions)
+	if err != nil {
+		t.Fatal("NewReader:", err)
+	}
+	if data, _, err := r.ZeroCopyReadPacketData(); err == nil {
+		t.Fatalf("corrupt block accepted on zero-copy path: got %d bytes", len(data))
+	}
+}
+
+// TestNgShortBlockTotalLength declares a block so short that even its packet
+// header cannot fit; the reader must report it instead of underflowing the
+// remaining-length counter.
+func TestNgShortBlockTotalLength(t *testing.T) {
+	// EPB with a 24-byte total length: 8-byte block header, 12 bytes of the
+	// 20-byte packet header, 4-byte trailer — no room for any packet data.
+	file := append(ngFile(0), le(nil, 6, 24, 0, 0, 0)...)
+	r, err := NewNgReader(bytes.NewReader(file), DefaultNgReaderOptions)
+	if err != nil {
+		t.Fatal("NewReader:", err)
+	}
+	if _, _, err := r.ReadPacketData(); err == nil {
+		t.Fatal("block shorter than its packet header was accepted")
+	}
+}
+
 func BenchmarkNgReadPacketData(b *testing.B) {
 	r := setupNgReadBenchmark(b)
 	b.ResetTimer()

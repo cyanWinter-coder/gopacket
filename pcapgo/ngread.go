@@ -539,6 +539,36 @@ OPTIONS:
 	return nil
 }
 
+// packetBlockMinRemainder is the part of a packet block that is not packet
+// data. currentBlock.length already excludes the trailing block total
+// length, so the only guaranteed remainder is the 4-byte End of Options an
+// Enhanced Packet Block or a legacy Packet Block carries after the data.
+// A Simple Packet Block has no options, so it has no guaranteed remainder.
+const (
+	packetBlockMinRemainder    = 4
+	simplePacketBlockMinRemain = 0
+)
+
+// checkCaptureLength rejects a packet block whose declared CaptureLength does
+// not fit in the bytes the block header says are still inside the block.
+// Without this check ReadPacketData would satisfy the declared length from
+// the following blocks, silently merging the next block into the packet and
+// leaving the reader desynchronized for every later block; a short file
+// instead surfaced as an opaque io.ErrUnexpectedEOF halfway through the data.
+func (r *NgReader) checkCaptureLength(minRemainder uint32) error {
+	if r.ci.CaptureLength < 0 {
+		return errLengthOverflow
+	}
+	if r.currentBlock.length < minRemainder {
+		return fmt.Errorf("block ends %d bytes before the packet data it declares", minRemainder-r.currentBlock.length)
+	}
+	remaining := r.currentBlock.length - minRemainder
+	if uint32(r.ci.CaptureLength) > remaining {
+		return fmt.Errorf("capture length %d exceeds %d bytes left in block", r.ci.CaptureLength, remaining)
+	}
+	return nil
+}
+
 // readPacketHeader looks for a packet (enhanced, simple, or packet) and parses the header.
 // If an interface descriptor, an interface statistics block, or a section header is encountered, those are handled accordingly.
 // All other block types are skipped. New block types must be added here.
@@ -562,6 +592,9 @@ FIND_PACKET:
 			r.ci.Timestamp = time.Unix(r.convertTime(r.ci.InterfaceIndex, uint64(r.getUint32(r.buf[4:8]))<<32|uint64(r.getUint32(r.buf[8:12])))).UTC()
 			r.ci.CaptureLength = int(r.getUint32(r.buf[12:16]))
 			r.ci.Length = int(r.getUint32(r.buf[16:20]))
+			if err := r.checkCaptureLength(packetBlockMinRemainder); err != nil {
+				return err
+			}
 			break FIND_PACKET
 		case ngBlockTypeSimplePacket:
 			if _, err := r.readBytes(r.buf[:4]); err != nil {
@@ -577,6 +610,9 @@ FIND_PACKET:
 			}
 			if r.ifaces[0].SnapLength != 0 && uint32(r.ci.CaptureLength) > r.ifaces[0].SnapLength {
 				r.ci.CaptureLength = int(r.ifaces[0].SnapLength)
+			}
+			if err := r.checkCaptureLength(simplePacketBlockMinRemain); err != nil {
+				return err
 			}
 			break FIND_PACKET
 		case ngBlockTypeInterfaceDescriptor:
@@ -603,6 +639,9 @@ FIND_PACKET:
 			r.ci.Timestamp = time.Unix(r.convertTime(r.ci.InterfaceIndex, uint64(r.getUint32(r.buf[4:8]))<<32|uint64(r.getUint32(r.buf[8:12])))).UTC()
 			r.ci.CaptureLength = int(r.getUint32(r.buf[12:16]))
 			r.ci.Length = int(r.getUint32(r.buf[16:20]))
+			if err := r.checkCaptureLength(packetBlockMinRemainder); err != nil {
+				return err
+			}
 			break FIND_PACKET
 		case ngBlockTypeNameResolution:
 			if err := r.readNameResolutionBlock(); err != nil {

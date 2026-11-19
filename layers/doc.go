@@ -57,5 +57,34 @@ this:
 
 This will make all future ethernet packets use your new decoder to decode IPv4
 packets, instead of the built-in decoder used by gopacket.
+
+# Malformed And Truncated Input
+
+Layer decoders are strict about the bytes they are given: any length, count or
+offset read from a packet is validated against the buffer before it is used to
+slice or index, so a crafted or truncated packet produces an error instead of
+an out-of-bounds panic. When the captured bytes end before the layer does, the
+decoder additionally calls DecodeFeedback.SetTruncated, which surfaces as
+PacketMetadata.Truncated (gopacket.NewPacket) or DecodingLayerParser.Truncated.
+
+Two properties let callers choose their own strictness without changing the
+Packet interface:
+
+  - A failed decode still registers the partial layer via AddLayer before the
+    error is returned, so Packet.Layer keeps returning it. Every Payload the
+    partial layer exposes is clipped to the captured bytes and therefore stays
+    in bounds; callers that would rather tolerate the loss (a TCP stream
+    reassembler, for example) can keep using the layer safely.
+  - An unknown next layer is not a panic. gopacket.NewPacket reports it
+    through Packet.ErrorLayer; a DecodingLayerParser returns
+    UnsupportedLayerType for a known type it was not given a decoder for, and
+    stops cleanly (LayerTypeZero) when the enumeration itself has no decoder.
+    Set DecodingLayerParserOptions.IgnoreUnsupported to turn the former into a
+    clean stop as well.
+
+Downstream packages rely on this contract: tcpassembly never re-validates the
+*layers.TCP it is handed and assumes its Payload is in bounds, while the
+capture readers in pcap and pcapgo guarantee the slice handed to a decoder is
+exactly the captured frame and report truncated capture files as read errors.
 */
 package layers
